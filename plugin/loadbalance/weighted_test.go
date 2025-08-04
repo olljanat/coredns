@@ -18,12 +18,16 @@ const oneDomainWRR = `
 w1,example.org
 192.168.1.15 10
 192.168.1.14 20
+192.168.1.0/24 30
+2001:db8::/32 40
 `
 
 var testOneDomainWRR = map[string]weights{
 	"w1,example.org.": {
 		&weightItem{net.ParseIP("192.168.1.15"), uint8(10)},
 		&weightItem{net.ParseIP("192.168.1.14"), uint8(20)},
+		&weightItem{mustParseCIDR("192.168.1.0/24"), uint8(30)},
+		&weightItem{mustParseCIDR("2001:db8::/32"), uint8(40)},
 	},
 }
 
@@ -74,6 +78,11 @@ w1,example.org
 192.168.1.300 10
 `
 
+const wrongCidrWRR = `
+w1,example.org
+192.168.1.0/33 10
+`
+
 const wrongWeightWRR = `
 w1,example.org
 192.168.1.14 300
@@ -98,7 +107,8 @@ func TestWeightFileUpdate(t *testing.T) {
 		// negative
 		{missingWeightWRR, true, nil, "wrong domain name"},
 		{missingDomainWRR, true, nil, "missing domain name"},
-		{wrongIpWRR, true, nil, "wrong IP address"},
+		{wrongIpWRR, true, nil, "wrong IP address or CIDR"},
+		{wrongCidrWRR, true, nil, "wrong IP address or CIDR"},
 		{wrongWeightWRR, true, nil, "wrong weight value"},
 		{zeroWeightWRR, true, nil, "wrong weight value"},
 	}
@@ -151,9 +161,21 @@ func checkDomainsWRR(t *testing.T, testIndex int, expectedDomains, domains map[s
 				ret = retError
 			} else {
 				for i, w := range expectedWeights {
-					if !w.address.Equal(ws[i].address) || w.value != ws[i].value {
-						t.Errorf("Test %d: Weight list differs at index %d for domain %s. "+
-							"Expected: %v got: %v", testIndex, i, dname, expectedWeights[i], ws[i])
+					switch expectedAddr := w.address.(type) {
+					case net.IP:
+						if actualAddr, ok := ws[i].address.(net.IP); !ok || !expectedAddr.Equal(actualAddr) || w.value != ws[i].value {
+							t.Errorf("Test %d: Weight list differs at index %d for domain %s. "+
+								"Expected: %v got: %v", testIndex, i, dname, expectedWeights[i], ws[i])
+							ret = retError
+						}
+					case *net.IPNet:
+						if actualAddr, ok := ws[i].address.(*net.IPNet); !ok || !expectedAddr.IP.Equal(actualAddr.IP) || expectedAddr.Mask.String() != actualAddr.Mask.String() || w.value != ws[i].value {
+							t.Errorf("Test %d: Weight list differs at index %d for domain %s. "+
+								"Expected: %v got: %v", testIndex, i, dname, expectedWeights[i], ws[i])
+							ret = retError
+						}
+					default:
+						t.Errorf("Test %d: Unexpected address type at index %d for domain %s: %T", testIndex, i, dname, w.address)
 						ret = retError
 					}
 				}
@@ -412,6 +434,9 @@ func TestLoadBalanceWRR(t *testing.T) {
 
 func checkTopIP(t *testing.T, i, j int, result []dns.RR, expectedTopIP string) {
 	t.Helper()
+	if expectedTopIP == "" {
+		return
+	}
 	expected := net.ParseIP(expectedTopIP)
 	for _, r := range result {
 		switch r.Header().Rrtype {
@@ -429,4 +454,13 @@ func checkTopIP(t *testing.T, i, j int, result []dns.RR, expectedTopIP string) {
 			return
 		}
 	}
+}
+
+// mustParseCIDR parses a CIDR string and returns the *net.IPNet, panicking on error.
+func mustParseCIDR(s string) *net.IPNet {
+	_, ipNet, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return ipNet
 }

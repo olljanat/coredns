@@ -34,9 +34,9 @@ type (
 	}
 	// Per domain weights
 	weights []*weightItem
-	// Weight assigned to an address
+	// Weight assigned to an IP address or subnet
 	weightItem struct {
-		address net.IP
+		address interface{} // net.IP or *net.IPNet
 		value   uint8
 	}
 	// Random uint generator
@@ -181,10 +181,20 @@ func (w *weightedRR) topAddressIndex(address []dns.RR) int {
 			ip = ar.(*dns.AAAA).AAAA
 		}
 		ws := w.domains[ar.Header().Name]
+		// Check for exact IP match first
 		for _, w := range ws {
-			if w.address.Equal(ip) {
+			if addr, ok := w.address.(net.IP); ok && addr.Equal(ip) {
 				wa.weight = w.value
 				break
+			}
+		}
+		// If no exact match, check for subnet match
+		if wa.weight == 1 {
+			for _, w := range ws {
+				if addr, ok := w.address.(*net.IPNet); ok && addr.Contains(ip) {
+					wa.weight = w.value
+					break
+				}
 			}
 		}
 		wsum += uint(wa.weight)
@@ -284,7 +294,7 @@ func (w *weightedRR) parseWeights(scanner *bufio.Scanner) (map[string]weights, e
 		switch len(fields) {
 		case 1:
 			// (domain) name sanity check
-			if net.ParseIP(fields[0]) != nil {
+			if _, err := parseIPOrSubnet(fields[0]); err == nil {
 				return nil, fmt.Errorf("wrong domain name:\"%s\" in weight file %s. (Maybe a missing weight value?)",
 					fields[0], w.fileName)
 			}
@@ -301,16 +311,16 @@ func (w *weightedRR) parseWeights(scanner *bufio.Scanner) (map[string]weights, e
 				domains[dname] = ws
 			}
 		case 2:
-			// IP address and weight value
-			ip := net.ParseIP(fields[0])
-			if ip == nil {
-				return nil, fmt.Errorf("wrong IP address:\"%s\" in weight file %s", fields[0], w.fileName)
+			// IP address or CIDR and weight value
+			addr, err := parseIPOrSubnet(fields[0])
+			if err != nil {
+				return nil, fmt.Errorf("wrong IP address or CIDR:\"%s\" in weight file %s", fields[0], w.fileName)
 			}
 			weight, err := strconv.ParseUint(fields[1], 10, 8)
 			if err != nil || weight == 0 {
 				return nil, fmt.Errorf("wrong weight value:\"%s\" in weight file %s", fields[1], w.fileName)
 			}
-			witem := &weightItem{address: ip, value: uint8(weight)}
+			witem := &weightItem{address: addr, value: uint8(weight)}
 			if dname == "" {
 				return nil, fmt.Errorf("missing domain name in weight file %s", w.fileName)
 			}
@@ -326,4 +336,17 @@ func (w *weightedRR) parseWeights(scanner *bufio.Scanner) (map[string]weights, e
 	}
 
 	return domains, nil
+}
+
+// parseIPOrSubnet parses a string as either an IP address or a CIDR subnet.
+func parseIPOrSubnet(input string) (interface{}, error) {
+	// Try parsing as CIDR (subnet)
+	if _, ipNet, err := net.ParseCIDR(input); err == nil {
+		return ipNet, nil
+	}
+	// Try parsing as single IP
+	if ip := net.ParseIP(input); ip != nil {
+		return ip, nil
+	}
+	return nil, fmt.Errorf("invalid IP or CIDR: %s", input)
 }
